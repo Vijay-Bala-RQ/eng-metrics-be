@@ -38,9 +38,7 @@ export async function getGithubRepos(org: string | undefined, pat?: string) {
             params: { type: "all", per_page: 100, page, sort: "updated" },
           });
           const repos: any[] = res.data || [];
-          repos
-            .filter((r: any) => r.owner?.login?.toLowerCase() === org.trim().toLowerCase())
-            .forEach((r) => repoMap.set(r.full_name, r));
+          repos.forEach((r) => repoMap.set(r.full_name, r));
           if (repos.length < 100) break;
           page++;
         }

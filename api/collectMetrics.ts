@@ -49,6 +49,11 @@ function buildOpenBugStateFilter(openBugStates: string[]): string {
   return " AND [System.State] <> 'Closed' AND [System.State] <> 'Resolved'";
 }
 
+function safeStr(v: any): string | null {
+  if (v === undefined || v === null) return null;
+  return String(v);
+}
+
 export default async function handler(req: any, res: any) {
   if (handleCors(req, res)) return;
   console.log(
@@ -137,35 +142,43 @@ export default async function handler(req: any, res: any) {
     if (repoId && repoId !== "none") {
       try {
         const memberRes = await axios.get(
-          `https://dev.azure.com/${org}/_apis/projects/${encodeURIComponent(adoProject)}/teams?api-version=7.1`,
+          `https://dev.azure.com/${org}/_apis/projects/${encodeURIComponent(adoProject)}/teams?api-version=7.1&$top=100`,
           { headers: repoHeaders },
         );
         const teams: any[] = memberRes.data.value || [];
-        for (const team of teams.slice(0, 10)) {
+        for (const team of teams) {
           try {
-            const membersRes = await axios.get(
-              `https://dev.azure.com/${org}/_apis/projects/${encodeURIComponent(adoProject)}/teams/${team.id}/members?api-version=7.1`,
-              { headers: repoHeaders },
-            );
-            for (const m of membersRes.data.value || []) {
-              const displayName: string = m.identity?.displayName || "";
-              const uniqueName: string = m.identity?.uniqueName || "";
-              if (!displayName) continue;
-              const parts = uniqueName.split("\\");
-              const shortName = parts[parts.length - 1];
-              const emailLocal = uniqueName.includes("@")
-                ? uniqueName.split("@")[0]
-                : shortName;
-              for (const key of [
-                displayName,
-                displayName.toLowerCase(),
-                uniqueName,
-                shortName,
-                emailLocal,
-                emailLocal.toLowerCase(),
-              ]) {
-                if (key) gitNameToDisplay[key] = displayName;
+            let memberPage = 1;
+            while (true) {
+              const membersRes = await axios.get(
+                `https://dev.azure.com/${org}/_apis/projects/${encodeURIComponent(adoProject)}/teams/${team.id}/members?api-version=7.1&$top=100&$skip=${(memberPage - 1) * 100}`,
+                { headers: repoHeaders },
+              );
+              const members: any[] = membersRes.data.value || [];
+              for (const m of members) {
+                const displayName: string = m.identity?.displayName || "";
+                const uniqueName: string = m.identity?.uniqueName || "";
+                if (!displayName) continue;
+                const parts = uniqueName.split("\\");
+                const shortName = parts[parts.length - 1];
+                const emailLocal = uniqueName.includes("@")
+                  ? uniqueName.split("@")[0]
+                  : shortName;
+                for (const key of [
+                  displayName,
+                  displayName.toLowerCase(),
+                  uniqueName,
+                  uniqueName.toLowerCase(),
+                  shortName,
+                  shortName.toLowerCase(),
+                  emailLocal,
+                  emailLocal.toLowerCase(),
+                ]) {
+                  if (key) gitNameToDisplay[key] = displayName;
+                }
               }
+              if (members.length < 100) break;
+              memberPage++;
             }
           } catch (e) { }
         }
@@ -175,7 +188,11 @@ export default async function handler(req: any, res: any) {
     }
 
     const resolveToDisplay = (raw: string): string =>
-      gitNameToDisplay[raw] || gitNameToDisplay[raw.toLowerCase()] || raw;
+      gitNameToDisplay[raw] ||
+      gitNameToDisplay[raw.toLowerCase()] ||
+      gitNameToDisplay[raw.split("@")[0]] ||
+      gitNameToDisplay[raw.split("@")[0]?.toLowerCase()] ||
+      raw;
 
     try {
       const aliasDoc = await db.collection("config").doc("nameAliases").get();
@@ -202,23 +219,34 @@ export default async function handler(req: any, res: any) {
 
     if (repoId && repoId !== "none") {
       try {
-        const prRes = await axios.get(
-          `${base}/_apis/git/repositories/${repoId}/pullrequests?searchCriteria.status=completed&$top=500${dateFilterPR}&api-version=7.1`,
-          { headers: repoHeaders },
-        );
-        const prs: any[] = prRes.data.value || [];
-        prCount = prs.length;
-        console.log(`[collectMetrics] PRs: ${prCount}`);
+        const [completedRes, activeRes] = await Promise.all([
+          axios.get(
+            `${base}/_apis/git/repositories/${repoId}/pullrequests?searchCriteria.status=completed&$top=500${dateFilterPR}&api-version=7.1`,
+            { headers: repoHeaders },
+          ),
+          axios.get(
+            `${base}/_apis/git/repositories/${repoId}/pullrequests?searchCriteria.status=active&$top=100&api-version=7.1`,
+            { headers: repoHeaders },
+          ).catch(() => ({ data: { value: [] } })),
+        ]);
+
+        const completedPRs: any[] = completedRes.data.value || [];
+        const activePRs: any[] = activeRes.data.value || [];
+        const prs = [...completedPRs, ...activePRs];
+        prCount = completedPRs.length;
+        console.log(`[collectMetrics] PRs: completed=${completedPRs.length} active=${activePRs.length}`);
         let totalHours = 0,
           totalComments = 0,
           totalPickupHours = 0,
           pickupCount = 0;
         for (const pr of prs) {
-          if (!pr.closedDate) continue;
+          const isActive = pr.status === "active";
           const created = new Date(pr.creationDate).getTime();
-          const closed = new Date(pr.closedDate).getTime();
-          const hrs = (closed - created) / 3600000;
-          totalHours += hrs;
+          let hrs = 0;
+          if (pr.closedDate) {
+            hrs = (new Date(pr.closedDate).getTime() - created) / 3600000;
+            totalHours += hrs;
+          }
           const author: string = resolveToDisplay(
             pr.createdBy?.displayName || "Unknown",
           );
@@ -228,8 +256,10 @@ export default async function handler(req: any, res: any) {
               totalReviewHours: 0,
               comments: 0,
             };
-          developerPrMap[author].prCount++;
-          developerPrMap[author].totalReviewHours += hrs;
+          if (!isActive) {
+            developerPrMap[author].prCount++;
+            developerPrMap[author].totalReviewHours += hrs;
+          }
           let commentCount = 0,
             firstCommentTime: number | null = null;
           try {
@@ -259,12 +289,12 @@ export default async function handler(req: any, res: any) {
           prLog.push({
             id: pr.pullRequestId,
             title: pr.title,
-            status: pr.status,
+            status: isActive ? "active" : pr.status,
             author,
-            reviewTimeHours: Math.round(hrs * 10) / 10,
+            reviewTimeHours: pr.closedDate ? Math.round(hrs * 10) / 10 : null,
             comments: commentCount,
             createdDate: pr.creationDate,
-            closedDate: pr.closedDate,
+            closedDate: pr.closedDate || null,
             isDraft: pr.isDraft || false,
             targetBranch: pr.targetRefName?.replace("refs/heads/", "") || "",
           });
@@ -351,8 +381,8 @@ export default async function handler(req: any, res: any) {
             buildNumber: b.buildNumber,
             result,
             status: b.status,
-            startTime: b.startTime,
-            finishTime: b.finishTime,
+            startTime: safeStr(b.startTime),
+            finishTime: safeStr(b.finishTime),
             durationMins: Math.round(durationMins * 10) / 10,
             requestedBy: b.requestedBy?.displayName || "",
             sourceBranch: b.sourceBranch?.replace("refs/heads/", "") || "",
@@ -471,7 +501,7 @@ export default async function handler(req: any, res: any) {
       const openBugRes = await axios.post(
         `${base}/_apis/wit/wiql?api-version=7.1`,
         {
-          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}`,
+          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}${wiqlDateFilter}`,
         },
         { headers: workItemsHeaders },
       );
@@ -801,9 +831,12 @@ async function handleGithubRepo(
   const developerPrMap: Record<string, any> = {};
 
   for (const pr of prs) {
+    const relevantDate = new Date(
+      pr.merged_at || pr.closed_at || pr.created_at,
+    ).getTime();
+    if (fromMs && relevantDate < fromMs) continue;
+    if (toMs && relevantDate > toMs) continue;
     const created = new Date(pr.created_at).getTime();
-    if (fromMs && created < fromMs) continue;
-    if (toMs && created > toMs) continue;
     const closedAt = pr.merged_at || pr.closed_at;
     const hrs = closedAt
       ? (new Date(closedAt).getTime() - created) / 3600000
@@ -812,8 +845,10 @@ async function handleGithubRepo(
     const author: string = pr.user?.login || "Unknown";
     if (!developerPrMap[author])
       developerPrMap[author] = { prCount: 0, totalReviewHours: 0 };
-    developerPrMap[author].prCount++;
-    developerPrMap[author].totalReviewHours += hrs;
+    if (closedAt) {
+      developerPrMap[author].prCount++;
+      developerPrMap[author].totalReviewHours += hrs;
+    }
     prLog.push({
       id: pr.number,
       title: pr.title,
@@ -827,7 +862,7 @@ async function handleGithubRepo(
     });
   }
 
-  const closedPrCount = prLog.filter((p) => p.status !== "open").length;
+  const closedPrCount = prLog.filter((p) => p.closedDate !== null).length;
   const avgReviewTimeHours =
     closedPrCount > 0
       ? Math.round((totalReviewHours / closedPrCount) * 10) / 10
@@ -890,8 +925,8 @@ async function handleGithubRepo(
           buildNumber: b.buildNumber,
           result,
           status: b.status,
-          startTime: b.startTime,
-          finishTime: b.finishTime,
+          startTime: safeStr(b.startTime),
+          finishTime: safeStr(b.finishTime),
           durationMins: Math.round(durationMins * 10) / 10,
           requestedBy: b.requestedBy?.displayName || "",
           sourceBranch: b.sourceBranch?.replace("refs/heads/", "") || "",
@@ -1033,7 +1068,7 @@ async function handleGithubRepo(
       const openBugRes = await axios.post(
         `${adoBase}/_apis/wit/wiql?api-version=7.1`,
         {
-          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}`,
+          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}${wiqlDateFilter}`,
         },
         { headers: workItemsHeaders },
       );
@@ -1109,13 +1144,13 @@ async function handleGithubRepo(
   const mergedDevs: Record<string, any> = {};
   for (const [k, v] of Object.entries(developerPrMap)) {
     if (!mergedDevs[k])
-      mergedDevs[k] = { prCount: 0, totalReviewHours: 0, commits: 0 };
+      mergedDevs[k] = { prCount: 0, totalReviewHours: 0, commits: 0, workItemsCompleted: 0, bugsFixed: 0, storiesCompleted: 0, tasksCompleted: 0, avgCycleDays: 0 };
     mergedDevs[k].prCount += v.prCount;
     mergedDevs[k].totalReviewHours += v.totalReviewHours;
   }
   for (const [k, v] of Object.entries(commitsByAuthor)) {
     if (!mergedDevs[k])
-      mergedDevs[k] = { prCount: 0, totalReviewHours: 0, commits: 0 };
+      mergedDevs[k] = { prCount: 0, totalReviewHours: 0, commits: 0, workItemsCompleted: 0, bugsFixed: 0, storiesCompleted: 0, tasksCompleted: 0, avgCycleDays: 0 };
     mergedDevs[k].commits += v as number;
   }
 
@@ -1130,18 +1165,18 @@ async function handleGithubRepo(
       avgCommentsPer: 0,
       totalComments: 0,
       commits: d.commits,
-      workItemsCompleted: 0,
-      bugsFixed: 0,
-      storiesCompleted: 0,
-      tasksCompleted: 0,
-      avgCycleDays: 0,
+      workItemsCompleted: d.workItemsCompleted || 0,
+      bugsFixed: d.bugsFixed || 0,
+      storiesCompleted: d.storiesCompleted || 0,
+      tasksCompleted: d.tasksCompleted || 0,
+      avgCycleDays: d.avgCycleDays || 0,
     }))
     .sort((a, b) => b.commits + b.prCount - (a.commits + a.prCount));
 
   const payload: any = {
-    prCount: prs.length,
+    prCount: closedPrCount,
     avgReviewTimeHours,
-    avgCommentsPerPr: 0,
+    avgCommentsPerPr: closedPrCount > 0 ? Math.round(totalPrComments / closedPrCount) : 0,
     totalPrComments,
     avgPrPickupHours: 0,
     successRate,
@@ -1152,7 +1187,7 @@ async function handleGithubRepo(
     storiesCompleted,
     tasksCompleted,
     avgCycleTimeDays,
-    totalCommits: Object.values(commitsByAuthor).reduce((a, b) => a + b, 0),
+    totalCommits: Object.values(commitsByAuthor).reduce((a: number, b) => a + (b as number), 0),
     uniqueContributors: Object.keys(commitsByAuthor).length,
     commitsByAuthor,
     longestBuildMins,
@@ -1177,7 +1212,7 @@ async function handleGithubRepo(
     message: "github metrics updated",
     docId,
     summary: {
-      prCount: prs.length,
+      prCount: closedPrCount,
       totalCommits: payload.totalCommits,
       builds: buildLog.length,
       avgTestExecutionMins,
