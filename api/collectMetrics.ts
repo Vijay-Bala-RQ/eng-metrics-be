@@ -80,7 +80,7 @@ export default async function handler(req: any, res: any) {
     const pipelinesAdoProject: string = decodeURIComponent(
       rawPipelinesAdoProject.replace(/\+/g, " "),
     );
-    const repoId: string = req.query.repoId || "";
+    const repoId: string = (req.query.repoId || "").toString().trim();
     const pipelineId: string =
       req.query.pipelineId || process.env.ADO_PIPELINE || "";
     const docId: string = req.query.docId || `default_${repoId}_${pipelineId}`;
@@ -141,9 +141,32 @@ export default async function handler(req: any, res: any) {
 
     const reposOrg: string = (req.query.reposOrg as string) || org;
 
-    const pipelinesHeaders = getPipelinesHeaders(req);
-    const workItemsHeaders = getWorkItemsHeaders(req);
-    const repoHeaders = getRepoHeaders(req);
+    // Each PAT is optional — only throw if the specific feature is actually used.
+    // Wrapping here prevents one missing PAT from blocking all other metrics.
+    let pipelinesHeaders: Record<string, string>;
+    let workItemsHeaders: Record<string, string>;
+    let repoHeaders: Record<string, string>;
+    try { pipelinesHeaders = getPipelinesHeaders(req); } catch (_) {
+      try { pipelinesHeaders = getWorkItemsHeaders(req); } catch (_) {
+        try { pipelinesHeaders = getRepoHeaders(req); } catch (_) {
+          pipelinesHeaders = {};
+        }
+      }
+    }
+    try { workItemsHeaders = getWorkItemsHeaders(req); } catch (_) {
+      try { workItemsHeaders = getPipelinesHeaders(req); } catch (_) {
+        try { workItemsHeaders = getRepoHeaders(req); } catch (_) {
+          workItemsHeaders = {};
+        }
+      }
+    }
+    try { repoHeaders = getRepoHeaders(req); } catch (_) {
+      try { repoHeaders = getPipelinesHeaders(req); } catch (_) {
+        try { repoHeaders = getWorkItemsHeaders(req); } catch (_) {
+          repoHeaders = {};
+        }
+      }
+    }
 
     const base = `https://dev.azure.com/${reposOrg}/${encodeURIComponent(reposAdoProject)}`;
     const workItemsBase = `https://dev.azure.com/${workItemsOrg}/${encodeURIComponent(adoProject)}`;
@@ -381,11 +404,15 @@ export default async function handler(req: any, res: any) {
               (new Date(b.finishTime).getTime() -
                 new Date(b.startTime).getTime()) /
               60000;
-            totalTime += durationMins;
-            if (durationMins > longestBuildMins)
-              longestBuildMins = durationMins;
-            if (durationMins < shortestBuildMins)
-              shortestBuildMins = durationMins;
+            // Only use successful builds for time-based metrics so cancelled/failed
+            // runs don't skew average, fastest, and slowest build times.
+            if (result === "succeeded") {
+              totalTime += durationMins;
+              if (durationMins > longestBuildMins)
+                longestBuildMins = durationMins;
+              if (durationMins < shortestBuildMins)
+                shortestBuildMins = durationMins;
+            }
           }
           buildLog.push({
             id: b.id,
@@ -404,7 +431,7 @@ export default async function handler(req: any, res: any) {
         }
         if (builds.length > 0) {
           successRate = Math.round((success / builds.length) * 100);
-          avgBuildTime = Math.round((totalTime / builds.length) * 10) / 10;
+          avgBuildTime = success > 0 ? Math.round((totalTime / success) * 10) / 10 : 0;
           if (shortestBuildMins === Infinity) shortestBuildMins = 0;
         }
 
@@ -496,6 +523,7 @@ export default async function handler(req: any, res: any) {
       storiesCompleted = 0,
       tasksCompleted = 0,
       avgCycleTimeDays = 0;
+    let _totalCycleDaysAll = 0, _cycleCountAll = 0;
     const workItemsByDev: Record<string, any> = {};
 
     try {
@@ -540,8 +568,6 @@ export default async function handler(req: any, res: any) {
             `${workItemsBase}/_apis/wit/workitems?ids=${batchIds}&fields=System.Id,System.WorkItemType,System.AssignedTo,System.CreatedDate,Microsoft.VSTS.Common.ClosedDate&api-version=7.1`,
             { headers: workItemsHeaders },
           );
-          let totalCycleDays = 0,
-            cycleCount = 0;
           for (const item of detailRes.data.value || []) {
             const f = item.fields;
             const rawAssignee: string =
@@ -571,14 +597,14 @@ export default async function handler(req: any, res: any) {
               const days =
                 (new Date(closed).getTime() - new Date(created).getTime()) /
                 86400000;
-              totalCycleDays += days;
-              cycleCount++;
+              _totalCycleDaysAll += days;
+              _cycleCountAll++;
               workItemsByDev[assignee].totalCycleDays += days;
             }
           }
-          if (cycleCount > 0)
+          if (_cycleCountAll > 0)
             avgCycleTimeDays =
-              Math.round((totalCycleDays / cycleCount) * 10) / 10;
+              Math.round((_totalCycleDaysAll / _cycleCountAll) * 10) / 10;
         } catch (e: any) {
           console.log("[collectMetrics] work items batch error:", e?.message);
         }
@@ -813,7 +839,11 @@ async function handleGithubRepo(
       try {
         adoHeaders = getWorkItemsHeaders(opts.headers);
       } catch (_) {
-        adoHeaders = null;
+        try {
+          adoHeaders = getRepoHeaders(opts.headers);
+        } catch (_) {
+          adoHeaders = null;
+        }
       }
     }
   }
@@ -930,10 +960,13 @@ async function handleGithubRepo(
             (new Date(b.finishTime).getTime() -
               new Date(b.startTime).getTime()) /
             60000;
-          totalTime += durationMins;
-          if (durationMins > longestBuildMins) longestBuildMins = durationMins;
-          if (durationMins < shortestBuildMins)
-            shortestBuildMins = durationMins;
+          // Only use successful builds for time-based metrics.
+          if (result === "succeeded") {
+            totalTime += durationMins;
+            if (durationMins > longestBuildMins) longestBuildMins = durationMins;
+            if (durationMins < shortestBuildMins)
+              shortestBuildMins = durationMins;
+          }
         }
         buildLog.push({
           id: b.id,
@@ -952,7 +985,7 @@ async function handleGithubRepo(
       }
       if (builds.length > 0) {
         successRate = Math.round((success / builds.length) * 100);
-        avgBuildTime = Math.round((totalTime / builds.length) * 10) / 10;
+        avgBuildTime = success > 0 ? Math.round((totalTime / success) * 10) / 10 : 0;
         shortestBuildMins =
           shortestBuildMins === Infinity
             ? 0
@@ -1098,6 +1131,7 @@ async function handleGithubRepo(
       );
       const allItemIds: any[] = allItemsRes.data.workItems || [];
       const workItemsByDev: Record<string, any> = {};
+      let _ghTotalCycleDays = 0, _ghCycleCount = 0;
       for (let i = 0; i < allItemIds.length; i += 200) {
         const batchIds = allItemIds
           .slice(i, i + 200)
@@ -1108,8 +1142,6 @@ async function handleGithubRepo(
             `${adoBase}/_apis/wit/workitems?ids=${batchIds}&fields=System.Id,System.WorkItemType,System.AssignedTo,System.CreatedDate,Microsoft.VSTS.Common.ClosedDate&api-version=7.1`,
             { headers: workItemsHeaders },
           );
-          let totalCycleDays = 0,
-            cycleCount = 0;
           for (const item of detailRes.data.value || []) {
             const f = item.fields;
             const assignee: string =
@@ -1138,14 +1170,14 @@ async function handleGithubRepo(
               const days =
                 (new Date(closed).getTime() - new Date(created).getTime()) /
                 86400000;
-              totalCycleDays += days;
-              cycleCount++;
+              _ghTotalCycleDays += days;
+              _ghCycleCount++;
               workItemsByDev[assignee].totalCycleDays += days;
             }
           }
-          if (cycleCount > 0)
+          if (_ghCycleCount > 0)
             avgCycleTimeDays =
-              Math.round((totalCycleDays / cycleCount) * 10) / 10;
+              Math.round((_ghTotalCycleDays / _ghCycleCount) * 10) / 10;
         } catch (e) { }
       }
       console.log(
