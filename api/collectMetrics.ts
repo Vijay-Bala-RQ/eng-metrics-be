@@ -72,6 +72,14 @@ export default async function handler(req: any, res: any) {
     const adoProject: string = decodeURIComponent(
       rawAdoProject.replace(/\+/g, " "),
     );
+    const rawReposAdoProject: string = (req.query.reposAdoProject as string) || rawAdoProject;
+    const reposAdoProject: string = decodeURIComponent(
+      rawReposAdoProject.replace(/\+/g, " "),
+    );
+    const rawPipelinesAdoProject: string = (req.query.pipelinesAdoProject as string) || rawAdoProject;
+    const pipelinesAdoProject: string = decodeURIComponent(
+      rawPipelinesAdoProject.replace(/\+/g, " "),
+    );
     const repoId: string = req.query.repoId || "";
     const pipelineId: string =
       req.query.pipelineId || process.env.ADO_PIPELINE || "";
@@ -115,6 +123,7 @@ export default async function handler(req: any, res: any) {
         pipelinesOrg,
         workItemsOrg,
         adoProject,
+        pipelinesAdoProject,
         fromDate,
         toDate,
         headers: req,
@@ -136,7 +145,9 @@ export default async function handler(req: any, res: any) {
     const workItemsHeaders = getWorkItemsHeaders(req);
     const repoHeaders = getRepoHeaders(req);
 
-    const base = `https://dev.azure.com/${reposOrg}/${encodeURIComponent(adoProject)}`;
+    const base = `https://dev.azure.com/${reposOrg}/${encodeURIComponent(reposAdoProject)}`;
+    const workItemsBase = `https://dev.azure.com/${workItemsOrg}/${encodeURIComponent(adoProject)}`;
+    const pipelinesBase = `https://dev.azure.com/${pipelinesOrg}/${encodeURIComponent(pipelinesAdoProject)}`;
     const gitNameToDisplay: Record<string, string> = {};
 
     if (repoId && repoId !== "none") {
@@ -353,7 +364,7 @@ export default async function handler(req: any, res: any) {
     if (pipelineId && pipelineId !== "none") {
       try {
         const buildRes = await axios.get(
-          `${base}/_apis/build/builds?definitions=${pipelineId}&$top=50${dateFilterBuild}&api-version=7.1`,
+          `${pipelinesBase}/_apis/build/builds?definitions=${pipelineId}&$top=50${dateFilterBuild}&api-version=7.1`,
           { headers: pipelinesHeaders },
         );
         const builds: any[] = buildRes.data.value || [];
@@ -403,7 +414,7 @@ export default async function handler(req: any, res: any) {
           const buildEntry = buildLog[i];
           try {
             const tlRes = await axios.get(
-              `${base}/_apis/build/builds/${buildEntry.id}/timeline?api-version=7.1`,
+              `${pipelinesBase}/_apis/build/builds/${buildEntry.id}/timeline?api-version=7.1`,
               { headers: pipelinesHeaders },
             );
             const records: any[] = tlRes.data.records || [];
@@ -444,7 +455,7 @@ export default async function handler(req: any, res: any) {
             } else {
               const testRun = await fetchTestRunForBuild(
                 buildEntry.id,
-                base,
+                pipelinesBase,
                 pipelinesHeaders,
               );
               if (testRun !== null) {
@@ -462,7 +473,7 @@ export default async function handler(req: any, res: any) {
         for (const b of builds.slice(0, 5)) {
           try {
             const covRes = await axios.get(
-              `${base}/_apis/test/codecoverage?buildId=${b.id}&api-version=7.1-preview.1`,
+              `${pipelinesBase}/_apis/test/codecoverage?buildId=${b.id}&api-version=7.1-preview.1`,
               { headers: pipelinesHeaders },
             );
             for (const stat of covRes.data?.coverageData?.[0]?.coverageStats ||
@@ -489,7 +500,7 @@ export default async function handler(req: any, res: any) {
 
     try {
       const bugRes = await axios.post(
-        `${base}/_apis/wit/wiql?api-version=7.1`,
+        `${workItemsBase}/_apis/wit/wiql?api-version=7.1`,
         {
           query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${wiqlDateFilter}`,
         },
@@ -499,7 +510,7 @@ export default async function handler(req: any, res: any) {
 
       const openStateFilter = buildOpenBugStateFilter(openBugStates);
       const openBugRes = await axios.post(
-        `${base}/_apis/wit/wiql?api-version=7.1`,
+        `${workItemsBase}/_apis/wit/wiql?api-version=7.1`,
         {
           query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}${wiqlDateFilter}`,
         },
@@ -508,7 +519,7 @@ export default async function handler(req: any, res: any) {
       bugsOpen = (openBugRes.data.workItems || []).length;
 
       const allItemsRes = await axios.post(
-        `${base}/_apis/wit/wiql?api-version=7.1`,
+        `${workItemsBase}/_apis/wit/wiql?api-version=7.1`,
         {
           query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND ([System.WorkItemType] = 'User Story' OR [System.WorkItemType] = 'Task' OR [System.WorkItemType] = 'Bug') AND ([System.State] = 'Closed' OR [System.State] = 'Done' OR [System.State] = 'Resolved')${wiqlDateFilter} ORDER BY [Microsoft.VSTS.Common.ClosedDate] DESC`,
         },
@@ -526,7 +537,7 @@ export default async function handler(req: any, res: any) {
           .join(",");
         try {
           const detailRes = await axios.get(
-            `${base}/_apis/wit/workitems?ids=${batchIds}&fields=System.Id,System.WorkItemType,System.AssignedTo,System.CreatedDate,Microsoft.VSTS.Common.ClosedDate&api-version=7.1`,
+            `${workItemsBase}/_apis/wit/workitems?ids=${batchIds}&fields=System.Id,System.WorkItemType,System.AssignedTo,System.CreatedDate,Microsoft.VSTS.Common.ClosedDate&api-version=7.1`,
             { headers: workItemsHeaders },
           );
           let totalCycleDays = 0,
@@ -774,6 +785,7 @@ async function handleGithubRepo(
     pipelinesOrg?: string;
     workItemsOrg?: string;
     adoProject?: string;
+    pipelinesAdoProject?: string;
     headers?: any;
     fromDate?: string;
     toDate?: string;
@@ -788,6 +800,9 @@ async function handleGithubRepo(
   const adoProject = opts.adoProject
     ? decodeURIComponent(opts.adoProject.replace(/\+/g, " "))
     : "";
+  const pipelinesAdoProject = opts.pipelinesAdoProject
+    ? decodeURIComponent(opts.pipelinesAdoProject.replace(/\+/g, " "))
+    : adoProject;
   const openBugStates = opts.openBugStates || [];
 
   let adoHeaders: Record<string, string> | null = null;
@@ -895,8 +910,8 @@ async function handleGithubRepo(
   let deploymentsLast30 = 0,
     deployFrequencyPerDay = 0;
 
-  if (pipelineId && pipelineId !== "none" && adoHeaders && pipelinesOrg && adoProject) {
-    const adoBase = `https://dev.azure.com/${pipelinesOrg}/${encodeURIComponent(adoProject)}`;
+  if (pipelineId && pipelineId !== "none" && adoHeaders && pipelinesOrg && pipelinesAdoProject) {
+    const adoBase = `https://dev.azure.com/${pipelinesOrg}/${encodeURIComponent(pipelinesAdoProject)}`;
     try {
       const buildRes = await axios.get(
         `${adoBase}/_apis/build/builds?definitions=${pipelineId}&$top=50${fromDate ? `&minTime=${fromDate}` : ""}&api-version=7.1`,
