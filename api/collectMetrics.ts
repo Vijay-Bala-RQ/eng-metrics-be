@@ -72,11 +72,13 @@ export default async function handler(req: any, res: any) {
     const adoProject: string = decodeURIComponent(
       rawAdoProject.replace(/\+/g, " "),
     );
-    const rawReposAdoProject: string = (req.query.reposAdoProject as string) || rawAdoProject;
+    const rawReposAdoProject: string =
+      (req.query.reposAdoProject as string) || rawAdoProject;
     const reposAdoProject: string = decodeURIComponent(
       rawReposAdoProject.replace(/\+/g, " "),
     );
-    const rawPipelinesAdoProject: string = (req.query.pipelinesAdoProject as string) || rawAdoProject;
+    const rawPipelinesAdoProject: string =
+      (req.query.pipelinesAdoProject as string) || rawAdoProject;
     const pipelinesAdoProject: string = decodeURIComponent(
       rawPipelinesAdoProject.replace(/\+/g, " "),
     );
@@ -132,37 +134,51 @@ export default async function handler(req: any, res: any) {
     }
 
     if (!org || !adoProject) {
-      return res
-        .status(400)
-        .json({
-          error: `Missing params. org="${org}" adoProject="${adoProject}"`,
-        });
+      return res.status(400).json({
+        error: `Missing params. org="${org}" adoProject="${adoProject}"`,
+      });
     }
 
     const reposOrg: string = (req.query.reposOrg as string) || org;
 
-    // Each PAT is optional — only throw if the specific feature is actually used.
-    // Wrapping here prevents one missing PAT from blocking all other metrics.
     let pipelinesHeaders: Record<string, string>;
     let workItemsHeaders: Record<string, string>;
     let repoHeaders: Record<string, string>;
-    try { pipelinesHeaders = getPipelinesHeaders(req); } catch (_) {
-      try { pipelinesHeaders = getWorkItemsHeaders(req); } catch (_) {
-        try { pipelinesHeaders = getRepoHeaders(req); } catch (_) {
+    try {
+      pipelinesHeaders = getPipelinesHeaders(req);
+    } catch (_) {
+      try {
+        pipelinesHeaders = getWorkItemsHeaders(req);
+      } catch (_) {
+        try {
+          pipelinesHeaders = getRepoHeaders(req);
+        } catch (_) {
           pipelinesHeaders = {};
         }
       }
     }
-    try { workItemsHeaders = getWorkItemsHeaders(req); } catch (_) {
-      try { workItemsHeaders = getPipelinesHeaders(req); } catch (_) {
-        try { workItemsHeaders = getRepoHeaders(req); } catch (_) {
+    try {
+      workItemsHeaders = getWorkItemsHeaders(req);
+    } catch (_) {
+      try {
+        workItemsHeaders = getPipelinesHeaders(req);
+      } catch (_) {
+        try {
+          workItemsHeaders = getRepoHeaders(req);
+        } catch (_) {
           workItemsHeaders = {};
         }
       }
     }
-    try { repoHeaders = getRepoHeaders(req); } catch (_) {
-      try { repoHeaders = getPipelinesHeaders(req); } catch (_) {
-        try { repoHeaders = getWorkItemsHeaders(req); } catch (_) {
+    try {
+      repoHeaders = getRepoHeaders(req);
+    } catch (_) {
+      try {
+        repoHeaders = getPipelinesHeaders(req);
+      } catch (_) {
+        try {
+          repoHeaders = getWorkItemsHeaders(req);
+        } catch (_) {
           repoHeaders = {};
         }
       }
@@ -258,17 +274,21 @@ export default async function handler(req: any, res: any) {
             `${base}/_apis/git/repositories/${repoId}/pullrequests?searchCriteria.status=completed&$top=500${dateFilterPR}&api-version=7.1`,
             { headers: repoHeaders },
           ),
-          axios.get(
-            `${base}/_apis/git/repositories/${repoId}/pullrequests?searchCriteria.status=active&$top=100&api-version=7.1`,
-            { headers: repoHeaders },
-          ).catch(() => ({ data: { value: [] } })),
+          axios
+            .get(
+              `${base}/_apis/git/repositories/${repoId}/pullrequests?searchCriteria.status=active&$top=100&api-version=7.1`,
+              { headers: repoHeaders },
+            )
+            .catch(() => ({ data: { value: [] } })),
         ]);
 
         const completedPRs: any[] = completedRes.data.value || [];
         const activePRs: any[] = activeRes.data.value || [];
         const prs = [...completedPRs, ...activePRs];
-        prCount = completedPRs.length;
-        console.log(`[collectMetrics] PRs: completed=${completedPRs.length} active=${activePRs.length}`);
+        prCount = completedPRs.length + activePRs.length;
+        console.log(
+          `[collectMetrics] PRs: completed=${completedPRs.length} active=${activePRs.length}`,
+        );
         let totalHours = 0,
           totalComments = 0,
           totalPickupHours = 0,
@@ -404,8 +424,7 @@ export default async function handler(req: any, res: any) {
               (new Date(b.finishTime).getTime() -
                 new Date(b.startTime).getTime()) /
               60000;
-            // Only use successful builds for time-based metrics so cancelled/failed
-            // runs don't skew average, fastest, and slowest build times.
+
             if (result === "succeeded") {
               totalTime += durationMins;
               if (durationMins > longestBuildMins)
@@ -431,7 +450,8 @@ export default async function handler(req: any, res: any) {
         }
         if (builds.length > 0) {
           successRate = Math.round((success / builds.length) * 100);
-          avgBuildTime = success > 0 ? Math.round((totalTime / success) * 10) / 10 : 0;
+          avgBuildTime =
+            success > 0 ? Math.round((totalTime / success) * 10) / 10 : 0;
           if (shortestBuildMins === Infinity) shortestBuildMins = 0;
         }
 
@@ -518,100 +538,9 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    let bugCount = 0,
-      bugsOpen = 0,
-      storiesCompleted = 0,
-      tasksCompleted = 0,
-      avgCycleTimeDays = 0;
-    let _totalCycleDaysAll = 0, _cycleCountAll = 0;
-    const workItemsByDev: Record<string, any> = {};
-
-    try {
-      const bugRes = await axios.post(
-        `${workItemsBase}/_apis/wit/wiql?api-version=7.1`,
-        {
-          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${wiqlDateFilter}`,
-        },
-        { headers: workItemsHeaders },
-      );
-      bugCount = (bugRes.data.workItems || []).length;
-
-      const openStateFilter = buildOpenBugStateFilter(openBugStates);
-      const openBugRes = await axios.post(
-        `${workItemsBase}/_apis/wit/wiql?api-version=7.1`,
-        {
-          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}${wiqlDateFilter}`,
-        },
-        { headers: workItemsHeaders },
-      );
-      bugsOpen = (openBugRes.data.workItems || []).length;
-
-      const allItemsRes = await axios.post(
-        `${workItemsBase}/_apis/wit/wiql?api-version=7.1`,
-        {
-          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND ([System.WorkItemType] = 'User Story' OR [System.WorkItemType] = 'Task' OR [System.WorkItemType] = 'Bug') AND ([System.State] = 'Closed' OR [System.State] = 'Done' OR [System.State] = 'Resolved')${wiqlDateFilter} ORDER BY [Microsoft.VSTS.Common.ClosedDate] DESC`,
-        },
-        { headers: workItemsHeaders },
-      );
-      const allItemIds: any[] = allItemsRes.data.workItems || [];
-      console.log(
-        `[collectMetrics] Work items: bugs=${bugCount} open=${bugsOpen} closedItems=${allItemIds.length}`,
-      );
-
-      for (let i = 0; i < allItemIds.length; i += 200) {
-        const batchIds = allItemIds
-          .slice(i, i + 200)
-          .map((w: any) => w.id)
-          .join(",");
-        try {
-          const detailRes = await axios.get(
-            `${workItemsBase}/_apis/wit/workitems?ids=${batchIds}&fields=System.Id,System.WorkItemType,System.AssignedTo,System.CreatedDate,Microsoft.VSTS.Common.ClosedDate&api-version=7.1`,
-            { headers: workItemsHeaders },
-          );
-          for (const item of detailRes.data.value || []) {
-            const f = item.fields;
-            const rawAssignee: string =
-              f["System.AssignedTo"]?.displayName || "Unassigned";
-            const assignee = resolveToDisplay(rawAssignee);
-            const workItemType: string = f["System.WorkItemType"] || "Unknown";
-            const created = f["System.CreatedDate"];
-            const closed = f["Microsoft.VSTS.Common.ClosedDate"];
-            if (!workItemsByDev[assignee])
-              workItemsByDev[assignee] = {
-                completed: 0,
-                totalCycleDays: 0,
-                bugs: 0,
-                stories: 0,
-                tasks: 0,
-              };
-            workItemsByDev[assignee].completed++;
-            if (workItemType === "Bug") workItemsByDev[assignee].bugs++;
-            else if (workItemType === "User Story") {
-              workItemsByDev[assignee].stories++;
-              storiesCompleted++;
-            } else if (workItemType === "Task") {
-              workItemsByDev[assignee].tasks++;
-              tasksCompleted++;
-            }
-            if (created && closed) {
-              const days =
-                (new Date(closed).getTime() - new Date(created).getTime()) /
-                86400000;
-              _totalCycleDaysAll += days;
-              _cycleCountAll++;
-              workItemsByDev[assignee].totalCycleDays += days;
-            }
-          }
-          if (_cycleCountAll > 0)
-            avgCycleTimeDays =
-              Math.round((_totalCycleDaysAll / _cycleCountAll) * 10) / 10;
-        } catch (e: any) {
-          console.log("[collectMetrics] work items batch error:", e?.message);
-        }
-      }
-    } catch (e: any) {
-      console.log("[collectMetrics] work items error:", e?.message);
-    }
+    // Work items (bugs, stories, tasks) are now fetched by the dedicated
+    // /api/collectWorkItems endpoint. collectMetrics only handles repo + pipeline
+    // data, so there is no cross-contamination between pipeline docs.
 
     const mergedDevs: Record<string, any> = {};
     const resolveKey = (raw: string): string =>
@@ -625,11 +554,6 @@ export default async function handler(req: any, res: any) {
           totalReviewHours: 0,
           comments: 0,
           commits: 0,
-          completed: 0,
-          totalCycleDays: 0,
-          bugs: 0,
-          stories: 0,
-          tasks: 0,
         };
       mergedDevs[n].prCount += v.prCount;
       mergedDevs[n].totalReviewHours += v.totalReviewHours;
@@ -643,33 +567,8 @@ export default async function handler(req: any, res: any) {
           totalReviewHours: 0,
           comments: 0,
           commits: 0,
-          completed: 0,
-          totalCycleDays: 0,
-          bugs: 0,
-          stories: 0,
-          tasks: 0,
         };
       mergedDevs[n].commits += v as number;
-    }
-    for (const [k, v] of Object.entries(workItemsByDev)) {
-      const n = resolveKey(k);
-      if (!mergedDevs[n])
-        mergedDevs[n] = {
-          prCount: 0,
-          totalReviewHours: 0,
-          comments: 0,
-          commits: 0,
-          completed: 0,
-          totalCycleDays: 0,
-          bugs: 0,
-          stories: 0,
-          tasks: 0,
-        };
-      mergedDevs[n].completed += (v as any).completed;
-      mergedDevs[n].totalCycleDays += (v as any).totalCycleDays;
-      mergedDevs[n].bugs += (v as any).bugs;
-      mergedDevs[n].stories += (v as any).stories;
-      mergedDevs[n].tasks += (v as any).tasks;
     }
 
     const developerMetrics = Object.entries(mergedDevs)
@@ -683,22 +582,8 @@ export default async function handler(req: any, res: any) {
         avgCommentsPer: d.prCount > 0 ? Math.round(d.comments / d.prCount) : 0,
         totalComments: d.comments,
         commits: d.commits,
-        workItemsCompleted: d.completed,
-        bugsFixed: d.bugs,
-        storiesCompleted: d.stories,
-        tasksCompleted: d.tasks,
-        avgCycleDays:
-          d.completed > 0
-            ? Math.round((d.totalCycleDays / d.completed) * 10) / 10
-            : 0,
       }))
-      .sort(
-        (a, b) =>
-          b.commits +
-          b.prCount +
-          b.workItemsCompleted -
-          (a.commits + a.prCount + a.workItemsCompleted),
-      );
+      .sort((a, b) => b.commits + b.prCount - (a.commits + a.prCount));
 
     const deploymentsLast30 = buildLog.filter(
       (b) =>
@@ -718,8 +603,6 @@ export default async function handler(req: any, res: any) {
       successRate,
       avgBuildTime,
       coverage,
-      bugCount,
-      bugsOpen,
       totalCommits,
       uniqueContributors,
       commitsByAuthor,
@@ -729,9 +612,6 @@ export default async function handler(req: any, res: any) {
           ? 0
           : Math.round(shortestBuildMins * 10) / 10,
       buildsByResult,
-      storiesCompleted,
-      tasksCompleted,
-      avgCycleTimeDays,
       deploymentsLast30,
       deployFrequencyPerDay,
       buildLog,
@@ -755,8 +635,6 @@ export default async function handler(req: any, res: any) {
         successRate,
         avgBuildTime,
         coverage,
-        bugCount,
-        bugsOpen,
         totalCommits,
         avgTestExecutionMins,
         developerCount: developerMetrics.length,
@@ -849,11 +727,9 @@ async function handleGithubRepo(
   }
 
   if (!githubFullName || !githubPat) {
-    return res
-      .status(400)
-      .json({
-        error: `GitHub repo requires githubFullName and x-github-pat. fullName="${githubFullName}"`,
-      });
+    return res.status(400).json({
+      error: `GitHub repo requires githubFullName and x-github-pat. fullName="${githubFullName}"`,
+    });
   }
 
   console.log(
@@ -940,7 +816,13 @@ async function handleGithubRepo(
   let deploymentsLast30 = 0,
     deployFrequencyPerDay = 0;
 
-  if (pipelineId && pipelineId !== "none" && adoHeaders && pipelinesOrg && pipelinesAdoProject) {
+  if (
+    pipelineId &&
+    pipelineId !== "none" &&
+    adoHeaders &&
+    pipelinesOrg &&
+    pipelinesAdoProject
+  ) {
     const adoBase = `https://dev.azure.com/${pipelinesOrg}/${encodeURIComponent(pipelinesAdoProject)}`;
     try {
       const buildRes = await axios.get(
@@ -960,10 +842,11 @@ async function handleGithubRepo(
             (new Date(b.finishTime).getTime() -
               new Date(b.startTime).getTime()) /
             60000;
-          // Only use successful builds for time-based metrics.
+
           if (result === "succeeded") {
             totalTime += durationMins;
-            if (durationMins > longestBuildMins) longestBuildMins = durationMins;
+            if (durationMins > longestBuildMins)
+              longestBuildMins = durationMins;
             if (durationMins < shortestBuildMins)
               shortestBuildMins = durationMins;
           }
@@ -985,7 +868,8 @@ async function handleGithubRepo(
       }
       if (builds.length > 0) {
         successRate = Math.round((success / builds.length) * 100);
-        avgBuildTime = success > 0 ? Math.round((totalTime / success) * 10) / 10 : 0;
+        avgBuildTime =
+          success > 0 ? Math.round((totalTime / success) * 10) / 10 : 0;
         shortestBuildMins =
           shortestBuildMins === Infinity
             ? 0
@@ -1112,11 +996,13 @@ async function handleGithubRepo(
       );
       bugCount = (bugRes.data.workItems || []).length;
 
+      // Open bugs: currently in the "open" states — no date filter,
+      // because a bug created before the selected period can still be open now.
       const openStateFilter = buildOpenBugStateFilter(openBugStates);
       const openBugRes = await axios.post(
         `${adoBase}/_apis/wit/wiql?api-version=7.1`,
         {
-          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}${wiqlDateFilter}`,
+          query: `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '${adoProject}' AND [System.WorkItemType] = 'Bug'${openStateFilter}`,
         },
         { headers: workItemsHeaders },
       );
@@ -1131,7 +1017,8 @@ async function handleGithubRepo(
       );
       const allItemIds: any[] = allItemsRes.data.workItems || [];
       const workItemsByDev: Record<string, any> = {};
-      let _ghTotalCycleDays = 0, _ghCycleCount = 0;
+      let _ghTotalCycleDays = 0,
+        _ghCycleCount = 0;
       for (let i = 0; i < allItemIds.length; i += 200) {
         const batchIds = allItemIds
           .slice(i, i + 200)
@@ -1191,13 +1078,31 @@ async function handleGithubRepo(
   const mergedDevs: Record<string, any> = {};
   for (const [k, v] of Object.entries(developerPrMap)) {
     if (!mergedDevs[k])
-      mergedDevs[k] = { prCount: 0, totalReviewHours: 0, commits: 0, workItemsCompleted: 0, bugsFixed: 0, storiesCompleted: 0, tasksCompleted: 0, avgCycleDays: 0 };
+      mergedDevs[k] = {
+        prCount: 0,
+        totalReviewHours: 0,
+        commits: 0,
+        workItemsCompleted: 0,
+        bugsFixed: 0,
+        storiesCompleted: 0,
+        tasksCompleted: 0,
+        avgCycleDays: 0,
+      };
     mergedDevs[k].prCount += v.prCount;
     mergedDevs[k].totalReviewHours += v.totalReviewHours;
   }
   for (const [k, v] of Object.entries(commitsByAuthor)) {
     if (!mergedDevs[k])
-      mergedDevs[k] = { prCount: 0, totalReviewHours: 0, commits: 0, workItemsCompleted: 0, bugsFixed: 0, storiesCompleted: 0, tasksCompleted: 0, avgCycleDays: 0 };
+      mergedDevs[k] = {
+        prCount: 0,
+        totalReviewHours: 0,
+        commits: 0,
+        workItemsCompleted: 0,
+        bugsFixed: 0,
+        storiesCompleted: 0,
+        tasksCompleted: 0,
+        avgCycleDays: 0,
+      };
     mergedDevs[k].commits += v as number;
   }
 
@@ -1223,7 +1128,8 @@ async function handleGithubRepo(
   const payload: any = {
     prCount: closedPrCount,
     avgReviewTimeHours,
-    avgCommentsPerPr: closedPrCount > 0 ? Math.round(totalPrComments / closedPrCount) : 0,
+    avgCommentsPerPr:
+      closedPrCount > 0 ? Math.round(totalPrComments / closedPrCount) : 0,
     totalPrComments,
     avgPrPickupHours: 0,
     successRate,
@@ -1234,7 +1140,10 @@ async function handleGithubRepo(
     storiesCompleted,
     tasksCompleted,
     avgCycleTimeDays,
-    totalCommits: Object.values(commitsByAuthor).reduce((a: number, b) => a + (b as number), 0),
+    totalCommits: Object.values(commitsByAuthor).reduce(
+      (a: number, b) => a + (b as number),
+      0,
+    ),
     uniqueContributors: Object.keys(commitsByAuthor).length,
     commitsByAuthor,
     longestBuildMins,
