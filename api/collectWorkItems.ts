@@ -82,7 +82,7 @@ export default async function handler(req: any, res: any) {
 
         const dateOnly = (iso: string) => iso.split("T")[0];
 
-        // Filter bugs by CreatedDate (when the bug was introduced in the period)
+
         const wiqlCreatedDateFilter = fromDate
             ? ` AND [System.CreatedDate] >= '${dateOnly(fromDate)}'${toDate && toDate !== "now"
                 ? ` AND [System.CreatedDate] <= '${dateOnly(toDate)}'`
@@ -90,7 +90,7 @@ export default async function handler(req: any, res: any) {
             }`
             : "";
 
-        // Filter completed items by ClosedDate (when they were actually finished)
+
         const wiqlClosedDateFilter = fromDate
             ? ` AND [Microsoft.VSTS.Common.ClosedDate] >= '${dateOnly(fromDate)}'${toDate && toDate !== "now"
                 ? ` AND [Microsoft.VSTS.Common.ClosedDate] <= '${dateOnly(toDate)}'`
@@ -104,8 +104,8 @@ export default async function handler(req: any, res: any) {
             `[collectWorkItems] org=${workItemsOrg} project=${adoProject} fromDate=${fromDate || "all"}`,
         );
 
-        // ── Bugs ──────────────────────────────────────────────────────────────────
-        // bugCount = bugs created within the selected date range
+
+
         let bugCount = 0;
         let bugsOpen = 0;
 
@@ -118,7 +118,7 @@ export default async function handler(req: any, res: any) {
         );
         bugCount = (bugRes.data.workItems || []).length;
 
-        // Open bugs: same date filter as bugCount so bugsOpen never exceeds it.
+
         const openStateFilter = buildOpenBugStateFilter(openBugStates);
         const openBugRes = await axios.post(
             `${workItemsBase}/_apis/wit/wiql?api-version=7.1`,
@@ -129,9 +129,9 @@ export default async function handler(req: any, res: any) {
         );
         bugsOpen = (openBugRes.data.workItems || []).length;
 
-        // ── Stories & Tasks ───────────────────────────────────────────────────────
-        // Use ClosedDate filter so we count items completed within the period,
-        // regardless of when they were originally created.
+
+
+
         let storiesCompleted = 0;
         let tasksCompleted = 0;
         let avgCycleTimeDays = 0;

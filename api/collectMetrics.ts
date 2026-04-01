@@ -1,6 +1,10 @@
 import { db } from "../services/firestore";
 import { handleCors } from "../services/cors";
-import { getGithubPRs, getGithubCommits } from "../services/github";
+import {
+  getGithubPRs,
+  getGithubCommits,
+  getGithubPRCommentCount,
+} from "../services/github";
 import axios from "axios";
 
 function getPipelinesHeaders(req: any): Record<string, string> {
@@ -85,10 +89,14 @@ export default async function handler(req: any, res: any) {
     const repoId: string = (req.query.repoId || "").toString().trim();
     const pipelineId: string =
       req.query.pipelineId || process.env.ADO_PIPELINE || "";
-    const docId: string = req.query.docId || `default_${repoId}_${pipelineId}`;
+
+    const rawDocId: string =
+      (req.query.docId as string) || `default_${repoId}_${pipelineId}`;
+    const docId: string = rawDocId.replace(/\//g, "_");
     const repoSource: string = req.query.repoSource || "azure";
     const githubFullName: string = req.query.githubFullName || "";
     const githubPat: string = (req.headers["x-github-pat"] as string) || "";
+    const pipelinesSource: string = req.query.pipelinesSource || "ado";
     const fromDate: string = req.query.fromDate || "";
     const toDate: string = req.query.toDate || "";
 
@@ -121,6 +129,7 @@ export default async function handler(req: any, res: any) {
         githubFullName,
         githubPat,
         pipelineId,
+        pipelinesSource,
         org,
         pipelinesOrg,
         workItemsOrg,
@@ -538,10 +547,6 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    // Work items (bugs, stories, tasks) are now fetched by the dedicated
-    // /api/collectWorkItems endpoint. collectMetrics only handles repo + pipeline
-    // data, so there is no cross-contamination between pipeline docs.
-
     const mergedDevs: Record<string, any> = {};
     const resolveKey = (raw: string): string =>
       gitNameToDisplay[raw] || gitNameToDisplay[raw.toLowerCase()] || raw;
@@ -685,6 +690,7 @@ async function handleGithubRepo(
     githubFullName: string;
     githubPat: string;
     pipelineId?: string;
+    pipelinesSource?: string;
     org?: string;
     pipelinesOrg?: string;
     workItemsOrg?: string;
@@ -698,6 +704,7 @@ async function handleGithubRepo(
 ) {
   const { docId, githubFullName, githubPat, pipelineId, fromDate, toDate } =
     opts;
+  const pipelinesSource = opts.pipelinesSource || "ado";
   const org = opts.org || "";
   const pipelinesOrg = opts.pipelinesOrg || org;
   const workItemsOrg = opts.workItemsOrg || org;
@@ -751,6 +758,9 @@ async function handleGithubRepo(
   const prLog: any[] = [];
   const developerPrMap: Record<string, any> = {};
 
+  let totalPickupHours = 0;
+  let pickupCount = 0;
+
   for (const pr of prs) {
     const relevantDate = new Date(
       pr.merged_at || pr.closed_at || pr.created_at,
@@ -765,23 +775,83 @@ async function handleGithubRepo(
     if (closedAt) totalReviewHours += hrs;
     const author: string = pr.user?.login || "Unknown";
     if (!developerPrMap[author])
-      developerPrMap[author] = { prCount: 0, totalReviewHours: 0 };
+      developerPrMap[author] = { prCount: 0, totalReviewHours: 0, comments: 0 };
     if (closedAt) {
       developerPrMap[author].prCount++;
       developerPrMap[author].totalReviewHours += hrs;
     }
+
+    const realCommentCount = await getGithubPRCommentCount(
+      githubFullName,
+      pr.number,
+      githubPat,
+    );
+    developerPrMap[author].comments += realCommentCount;
+
+    let firstCommentTime: number | null = null;
+    try {
+      const ghHeaders: any = {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${githubPat}`,
+      };
+      const reviewsRes = await axios.get(
+        `https://api.github.com/repos/${githubFullName}/pulls/${pr.number}/reviews`,
+        { headers: ghHeaders, params: { per_page: 100 } },
+      );
+      for (const review of reviewsRes.data || []) {
+        if (review.user?.login === author) continue;
+        const rt = new Date(review.submitted_at).getTime();
+        if (
+          !isNaN(rt) &&
+          (firstCommentTime === null || rt < firstCommentTime)
+        ) {
+          firstCommentTime = rt;
+        }
+      }
+    } catch (_) { }
+    if (firstCommentTime !== null) {
+      totalPickupHours += (firstCommentTime - created) / 3600000;
+      pickupCount++;
+    }
+
+    let additions: number | null = null;
+    let deletions: number | null = null;
+    let changedFiles: number | null = null;
+    try {
+      const ghHeaders: any = {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${githubPat}`,
+      };
+      const prDetailRes = await axios.get(
+        `https://api.github.com/repos/${githubFullName}/pulls/${pr.number}`,
+        { headers: ghHeaders },
+      );
+      additions = prDetailRes.data.additions ?? null;
+      deletions = prDetailRes.data.deletions ?? null;
+      changedFiles = prDetailRes.data.changed_files ?? null;
+    } catch (_) { }
+
     prLog.push({
       id: pr.number,
       title: pr.title,
       author,
       reviewTimeHours: closedAt ? Math.round(hrs * 10) / 10 : null,
-      comments: (pr.comments || 0) + (pr.review_comments || 0),
+      comments: realCommentCount,
       createdDate: pr.created_at,
       closedDate: closedAt || null,
       targetBranch: pr.base?.ref || "",
       status: pr.merged_at ? "merged" : closedAt ? "closed" : "open",
+      isDraft: pr.draft || false,
+      additions,
+      deletions,
+      changedFiles,
     });
   }
+
+  const avgPrPickupHours =
+    pickupCount > 0
+      ? Math.round((totalPickupHours / pickupCount) * 10) / 10
+      : 0;
 
   const closedPrCount = prLog.filter((p) => p.closedDate !== null).length;
   const avgReviewTimeHours =
@@ -817,6 +887,131 @@ async function handleGithubRepo(
     deployFrequencyPerDay = 0;
 
   if (
+    pipelinesSource === "github" &&
+    pipelineId &&
+    pipelineId !== "none" &&
+    githubPat &&
+    githubFullName
+  ) {
+    const ghHeaders: any = {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${githubPat}`,
+    };
+    try {
+      const runsRes = await axios.get(
+        `https://api.github.com/repos/${githubFullName}/actions/workflows/${pipelineId}/runs`,
+        {
+          headers: ghHeaders,
+          params: {
+            per_page: 50,
+            ...(fromDate ? { created: `>=${fromDate}` } : {}),
+          },
+        },
+      );
+      const runs: any[] = runsRes.data?.workflow_runs || [];
+      console.log(
+        `[collectMetrics/github] Actions runs for workflow ${pipelineId}: ${runs.length}`,
+      );
+      let totalTime = 0,
+        success = 0;
+      for (const run of runs) {
+        const result =
+          run.conclusion ||
+          (run.status === "in_progress" ? "in_progress" : "unknown");
+        buildsByResult[result] = (buildsByResult[result] || 0) + 1;
+        if (result === "success") success++;
+        let durationMins = 0;
+        if (run.run_started_at && run.updated_at && result !== "in_progress") {
+          durationMins =
+            (new Date(run.updated_at).getTime() -
+              new Date(run.run_started_at).getTime()) /
+            60000;
+          if (result === "success") {
+            totalTime += durationMins;
+            if (durationMins > longestBuildMins)
+              longestBuildMins = durationMins;
+            if (durationMins < shortestBuildMins)
+              shortestBuildMins = durationMins;
+          }
+        }
+
+        const stages: any[] = [];
+        let testMins: number | null = null;
+        try {
+          const jobsRes = await axios.get(
+            `https://api.github.com/repos/${githubFullName}/actions/runs/${run.id}/jobs`,
+            { headers: ghHeaders, params: { per_page: 100 } },
+          );
+          for (const job of jobsRes.data?.jobs || []) {
+            const jobDurationSecs =
+              job.started_at && job.completed_at
+                ? (new Date(job.completed_at).getTime() -
+                  new Date(job.started_at).getTime()) /
+                1000
+                : null;
+            stages.push({
+              name: job.name,
+              state: job.status,
+              result: job.conclusion,
+              durationSecs: jobDurationSecs,
+            });
+
+            if (jobDurationSecs !== null && /test/i.test(job.name)) {
+              testMins = (testMins || 0) + jobDurationSecs / 60;
+            }
+          }
+        } catch (_) { }
+
+        buildLog.push({
+          id: run.id,
+          buildNumber: run.run_number?.toString() || run.id.toString(),
+          result,
+          status: run.status,
+          startTime: safeStr(run.run_started_at),
+          finishTime: safeStr(result !== "in_progress" ? run.updated_at : null),
+          durationMins: Math.round(durationMins * 10) / 10,
+          requestedBy: run.triggering_actor?.login || run.actor?.login || "",
+          sourceBranch: run.head_branch || "",
+          reason: run.event || "",
+          stages,
+          testExecutionMins:
+            testMins !== null ? Math.round(testMins * 10) / 10 : null,
+        });
+
+        if (testMins !== null) {
+          avgTestExecutionMins =
+            ((avgTestExecutionMins || 0) * (buildLog.length - 1) + testMins) /
+            buildLog.length;
+        }
+      }
+
+      if (runs.length > 0) {
+        successRate = Math.round((success / runs.length) * 100);
+        avgBuildTime =
+          success > 0 ? Math.round((totalTime / success) * 10) / 10 : 0;
+        shortestBuildMins =
+          shortestBuildMins === Infinity
+            ? 0
+            : Math.round(shortestBuildMins * 10) / 10;
+        longestBuildMins = Math.round(longestBuildMins * 10) / 10;
+      }
+      if (avgTestExecutionMins !== null)
+        avgTestExecutionMins = Math.round(avgTestExecutionMins * 10) / 10;
+
+      deploymentsLast30 = buildLog.filter(
+        (b) =>
+          b.result === "success" &&
+          b.startTime &&
+          Date.now() - new Date(b.startTime).getTime() < 30 * 86400000,
+      ).length;
+      deployFrequencyPerDay = Math.round((deploymentsLast30 / 30) * 100) / 100;
+    } catch (e: any) {
+      console.log(
+        "[collectMetrics/github] GitHub Actions pipeline error:",
+        e?.message,
+      );
+    }
+  } else if (
     pipelineId &&
     pipelineId !== "none" &&
     adoHeaders &&
@@ -996,8 +1191,6 @@ async function handleGithubRepo(
       );
       bugCount = (bugRes.data.workItems || []).length;
 
-      // Open bugs: currently in the "open" states — no date filter,
-      // because a bug created before the selected period can still be open now.
       const openStateFilter = buildOpenBugStateFilter(openBugStates);
       const openBugRes = await axios.post(
         `${adoBase}/_apis/wit/wiql?api-version=7.1`,
@@ -1081,6 +1274,7 @@ async function handleGithubRepo(
       mergedDevs[k] = {
         prCount: 0,
         totalReviewHours: 0,
+        comments: 0,
         commits: 0,
         workItemsCompleted: 0,
         bugsFixed: 0,
@@ -1090,12 +1284,14 @@ async function handleGithubRepo(
       };
     mergedDevs[k].prCount += v.prCount;
     mergedDevs[k].totalReviewHours += v.totalReviewHours;
+    mergedDevs[k].comments += v.comments || 0;
   }
   for (const [k, v] of Object.entries(commitsByAuthor)) {
     if (!mergedDevs[k])
       mergedDevs[k] = {
         prCount: 0,
         totalReviewHours: 0,
+        comments: 0,
         commits: 0,
         workItemsCompleted: 0,
         bugsFixed: 0,
@@ -1114,8 +1310,9 @@ async function handleGithubRepo(
         d.prCount > 0
           ? Math.round((d.totalReviewHours / d.prCount) * 10) / 10
           : 0,
-      avgCommentsPer: 0,
-      totalComments: 0,
+      avgCommentsPer:
+        d.prCount > 0 ? Math.round((d.comments || 0) / d.prCount) : 0,
+      totalComments: d.comments || 0,
       commits: d.commits,
       workItemsCompleted: d.workItemsCompleted || 0,
       bugsFixed: d.bugsFixed || 0,
@@ -1131,7 +1328,7 @@ async function handleGithubRepo(
     avgCommentsPerPr:
       closedPrCount > 0 ? Math.round(totalPrComments / closedPrCount) : 0,
     totalPrComments,
-    avgPrPickupHours: 0,
+    avgPrPickupHours,
     successRate,
     avgBuildTime,
     coverage,

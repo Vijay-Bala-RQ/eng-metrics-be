@@ -112,6 +112,62 @@ export async function getGithubPRs(fullName: string, pat: string): Promise<any[]
   return all;
 }
 
+/**
+ * Fetch the real comment count for a single PR using both official GitHub endpoints:
+ *  - GET /repos/{fullName}/issues/{prNumber}/comments  → general discussion comments
+ *  - GET /repos/{fullName}/pulls/{prNumber}/comments   → inline diff/review comments
+ *
+ * The `comments` and `review_comments` fields on the PR list response are stale
+ * cached integers and are often wrong. This function fetches the actual counts.
+ */
+export async function getGithubPRCommentCount(
+  fullName: string,
+  prNumber: number,
+  pat: string
+): Promise<number> {
+  const headers: any = {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${pat}`,
+  };
+
+  let issueCommentCount = 0;
+  let reviewCommentCount = 0;
+
+  try {
+    let page = 1;
+    while (true) {
+      const res = await axios.get(
+        `https://api.github.com/repos/${fullName}/issues/${prNumber}/comments`,
+        { headers, params: { per_page: 100, page } }
+      );
+      const comments: any[] = res.data || [];
+      issueCommentCount += comments.length;
+      if (comments.length < 100) break;
+      page++;
+    }
+  } catch (err: any) {
+    console.log(`[GitHub] issue comments error for PR #${prNumber}: ${err.response?.status}`);
+  }
+
+  try {
+    let page = 1;
+    while (true) {
+      const res = await axios.get(
+        `https://api.github.com/repos/${fullName}/pulls/${prNumber}/comments`,
+        { headers, params: { per_page: 100, page } }
+      );
+      const comments: any[] = res.data || [];
+      reviewCommentCount += comments.length;
+      if (comments.length < 100) break;
+      page++;
+    }
+  } catch (err: any) {
+    console.log(`[GitHub] review comments error for PR #${prNumber}: ${err.response?.status}`);
+  }
+
+  return issueCommentCount + reviewCommentCount;
+}
+
 export async function getGithubCommits(fullName: string, pat: string): Promise<any[]> {
   const headers: any = {
     Accept: "application/vnd.github+json",
